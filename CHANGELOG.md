@@ -1,3 +1,12 @@
+## [v1.15.0](https://github.com/docling-project/docling-jobkit/releases/tag/v1.15.0) - 2026-04-01
+
+### Feature
+
+* Add preset and custom_config for layout, picture classifier and ocr ([#114](https://github.com/docling-project/docling-jobkit/issues/114)) ([`65eca34`](https://github.com/docling-project/docling-jobkit/commit/65eca34d16da11e270f927941fdc5008bf979cf8))
+* Control maximum concurrent redis requests to avoid pool exhaustion ([#112](https://github.com/docling-project/docling-jobkit/issues/112)) ([`bc27836`](https://github.com/docling-project/docling-jobkit/commit/bc2783681151e83feba2b0c5d5e444dcdee8759e))
+* Add on_result_fetched() lifecycle hook with per-orchestrator consumed TTL ([#111](https://github.com/docling-project/docling-jobkit/issues/111)) ([`0448e03`](https://github.com/docling-project/docling-jobkit/commit/0448e03cba1e9a960da77c9ac6767a9b92c82866))
+* Add Ray orchestrator with fair scheduling ([#110](https://github.com/docling-project/docling-jobkit/issues/110)) ([`bd2decd`](https://github.com/docling-project/docling-jobkit/commit/bd2decd36068493e322b68279280400d2f07f897))
+
 ## [v1.14.0](https://github.com/docling-project/docling-jobkit/releases/tag/v1.14.0) - 2026-03-23
 
 ### Feature
