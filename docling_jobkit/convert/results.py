@@ -1,5 +1,7 @@
+import json
 import logging
 import os
+import re
 import shutil
 import time
 from collections.abc import Iterable
@@ -37,6 +39,69 @@ if TYPE_CHECKING:
 
 _log = logging.getLogger(__name__)
 PERSIST_ROOT = Path('/work/output')
+
+_CJK_CHAR_RE = r"\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff"
+_CJK_PUNCT_RE = r"，。！？；：、】【（）《》“”‘’、"
+_CJK_CHAR_CLASS = f"[{_CJK_CHAR_RE}]"
+_CJK_OR_PUNCT_CLASS = f"[{_CJK_CHAR_RE}{_CJK_PUNCT_RE}]"
+
+
+def _merge_broken_cjk_lines(text: str) -> str:
+    lines = text.splitlines()
+    if len(lines) <= 1:
+        return text
+
+    merged: list[str] = []
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not merged:
+            merged.append(line)
+            continue
+        if not line:
+            merged.append(line)
+            continue
+
+        prev = merged[-1]
+        if not prev:
+            merged.append(line)
+            continue
+
+        is_new_block = bool(
+            re.match(r"^(#{1,6}\s|[-*+]\s|\d+[.)、]\s*|[（(]?[一二三四五六七八九十]+[）)]\s*)", line)
+        )
+        prev_ends_sentence = bool(re.search(r"[。！？!?；;：:]$", prev))
+        line_is_short_cjk = bool(re.fullmatch(rf"{_CJK_OR_PUNCT_CLASS}{{1,6}}", line))
+        prev_ends_with_cjk = bool(re.search(rf"{_CJK_OR_PUNCT_CLASS}$", prev))
+        line_starts_with_cjk = bool(re.match(rf"^{_CJK_OR_PUNCT_CLASS}", line))
+
+        if not is_new_block and not prev_ends_sentence and (
+            line_is_short_cjk or (prev_ends_with_cjk and line_starts_with_cjk)
+        ):
+            merged[-1] = prev + line
+        else:
+            merged.append(line)
+
+    return "\n".join(merged)
+
+
+def _normalize_cjk_spacing(text: str) -> str:
+    text = _merge_broken_cjk_lines(text)
+    text = re.sub(rf"(?<={_CJK_CHAR_CLASS})[ \\t]+(?={_CJK_CHAR_CLASS})", "", text)
+    text = re.sub(rf"(?<={_CJK_OR_PUNCT_CLASS})[ \\t]+(?=[{_CJK_PUNCT_RE}])", "", text)
+    text = re.sub(rf"(?<=[{_CJK_PUNCT_RE}])[ \\t]+(?={_CJK_OR_PUNCT_CLASS})", "", text)
+    text = re.sub(rf"([（《“‘【])\s+(?={_CJK_OR_PUNCT_CLASS})", r"\1", text)
+    text = re.sub(rf"(?<={_CJK_OR_PUNCT_CLASS})\s+([）》”’】])", r"\1", text)
+    return text
+
+
+def _normalize_export_json_payload(payload: object):
+    if isinstance(payload, dict):
+        return {k: _normalize_export_json_payload(v) for k, v in payload.items()}
+    if isinstance(payload, list):
+        return [_normalize_export_json_payload(v) for v in payload]
+    if isinstance(payload, str):
+        return _normalize_cjk_spacing(payload)
+    return payload
 
 
 def _persist_export_artifacts(temp_file: Path, doc_stem: str) -> tuple[Path, Path | None]:
@@ -106,7 +171,6 @@ def _export_document_as_content(
 
         if export_json:
             if output_dir is not None:
-                import json
                 fname = output_dir / f'{conv_res.input.file.stem}.json'
                 new_doc.save_as_json(
                     filename=fname,
@@ -118,7 +182,12 @@ def _export_document_as_content(
                 import logging; logging.getLogger(__name__).warning('DIAG json export output_dir=%s filename=%s persisted_file=%s artifacts=%s', document.output_dir, document.filename, persisted_file, persisted_artifacts)
                 # 重新读取 JSON 内容（图片引用已经被替换）
                 json_text = persisted_file.read_text(encoding='utf-8')
-                document.json_content = type(new_doc).model_validate_json(json_text)
+                json_payload = _normalize_export_json_payload(json.loads(json_text))
+                persisted_file.write_text(
+                    json.dumps(json_payload, ensure_ascii=False, indent=2),
+                    encoding='utf-8',
+                )
+                document.json_content = type(new_doc).model_validate(json_payload)
             else:
                 document.json_content = new_doc
         if export_html:
@@ -131,13 +200,21 @@ def _export_document_as_content(
                 )
                 persisted_file, _ = _persist_export_artifacts(fname, conv_res.input.file.stem)
                 document.output_dir = str(PERSIST_ROOT)
-                document.html_content = persisted_file.read_text(encoding='utf-8')
+                normalized_html = _normalize_cjk_spacing(
+                    persisted_file.read_text(encoding='utf-8')
+                )
+                persisted_file.write_text(normalized_html, encoding='utf-8')
+                document.html_content = normalized_html
             else:
-                document.html_content = new_doc.export_to_html(image_mode=image_mode)
+                document.html_content = _normalize_cjk_spacing(
+                    new_doc.export_to_html(image_mode=image_mode)
+                )
         if export_txt:
-            document.text_content = new_doc.export_to_markdown(
-                strict_text=True,
-                image_mode=image_mode,
+            document.text_content = _normalize_cjk_spacing(
+                new_doc.export_to_markdown(
+                    strict_text=True,
+                    image_mode=image_mode,
+                )
             )
         if export_md:
             if output_dir is not None:
@@ -151,11 +228,17 @@ def _export_document_as_content(
                 persisted_file, _ = _persist_export_artifacts(fname, conv_res.input.file.stem)
                 document.output_dir = str(PERSIST_ROOT)
                 _log.warning('DIAG results output_dir=%s filename=%s persisted_file=%s', document.output_dir, document.filename, persisted_file)
-                document.md_content = persisted_file.read_text(encoding='utf-8')
+                normalized_md = _normalize_cjk_spacing(
+                    persisted_file.read_text(encoding='utf-8')
+                )
+                persisted_file.write_text(normalized_md, encoding='utf-8')
+                document.md_content = normalized_md
             else:
-                document.md_content = new_doc.export_to_markdown(
-                    image_mode=image_mode,
-                    page_break_placeholder=md_page_break_placeholder or None,
+                document.md_content = _normalize_cjk_spacing(
+                    new_doc.export_to_markdown(
+                        image_mode=image_mode,
+                        page_break_placeholder=md_page_break_placeholder or None,
+                    )
                 )
         if export_doctags:
             document.doctags_content = new_doc.export_to_doctags()
@@ -192,6 +275,12 @@ def _export_documents_as_files(
                     image_mode=image_export_mode,
                     artifacts_dir=artifacts_dir,
                 )
+                json_payload = json.loads(fname.read_text(encoding='utf-8'))
+                json_payload = _normalize_export_json_payload(json_payload)
+                fname.write_text(
+                    json.dumps(json_payload, ensure_ascii=False, indent=2),
+                    encoding='utf-8',
+                )
 
             if export_html:
                 fname = output_dir / f'{doc_filename}.html'
@@ -200,6 +289,10 @@ def _export_documents_as_files(
                     filename=fname,
                     image_mode=image_export_mode,
                     artifacts_dir=artifacts_dir,
+                )
+                fname.write_text(
+                    _normalize_cjk_spacing(fname.read_text(encoding='utf-8')),
+                    encoding='utf-8',
                 )
 
             if export_txt:
@@ -210,6 +303,10 @@ def _export_documents_as_files(
                     strict_text=True,
                     image_mode=ImageRefMode.PLACEHOLDER,
                 )
+                fname.write_text(
+                    _normalize_cjk_spacing(fname.read_text(encoding='utf-8')),
+                    encoding='utf-8',
+                )
 
             if export_md:
                 fname = output_dir / f'{doc_filename}.md'
@@ -219,6 +316,10 @@ def _export_documents_as_files(
                     artifacts_dir=artifacts_dir,
                     image_mode=image_export_mode,
                     page_break_placeholder=md_page_break_placeholder or None,
+                )
+                fname.write_text(
+                    _normalize_cjk_spacing(fname.read_text(encoding='utf-8')),
+                    encoding='utf-8',
                 )
 
             if export_doctags:
@@ -359,7 +460,7 @@ def process_export_results(
             export_txt=export_txt,
             export_doctags=export_doctags,
             image_export_mode=conversion_options.image_export_mode,
-            md_page_break_placeholder=md_page_break_placeholder,
+            md_page_break_placeholder=conversion_options.md_page_break_placeholder,
         )
         files = os.listdir(output_dir)
         if len(files) == 0:
